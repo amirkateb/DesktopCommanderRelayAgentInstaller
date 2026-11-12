@@ -7,7 +7,7 @@ A colorful, interactive installer and management utility for connecting Ubuntu/D
 
 **Languages:** [English](#english) · [فارسی](#راهنمای-فارسی)
 
-> **Important:** This README documents **`desktop-commander-relay-manager.sh` (v2.0.0)**, not the previous one-shot `install-desktop-commander-relay-agent.sh` script. The new manager must be downloaded or added to this repository before the commands below can be run from a Git clone.
+> **Important:** This README documents **`desktop-commander-relay-manager.sh` (v2.0.0)**, not the previous one-shot `install-desktop-commander-relay-agent.sh` script. The new manager is available in the [`main` branch](https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller) and can be installed directly from GitHub by cloning the repository or downloading the script.
 
 ---
 
@@ -96,36 +96,55 @@ The selected user must exist, unless it is the automatically created `desktop-co
 
 ## Quick installation
 
-Copy **`desktop-commander-relay-manager.sh`** to the **new agent server** and execute:
+Run the commands below **on the new Ubuntu/Debian agent server**, not on the central relay server.
+
+### Method 1 — Clone directly from GitHub (recommended)
 
 ```bash
+git clone https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller.git
+cd DesktopCommanderRelayAgentInstaller
 chmod +x desktop-commander-relay-manager.sh
 sudo ./desktop-commander-relay-manager.sh
 ```
 
-The interactive menu opens. Select **1 — Install a new relay agent**.
-
-Alternatively, open the installation wizard directly:
+The interactive menu opens. Select **1 — Install a new relay agent**. To start the installation wizard immediately, replace the last command with:
 
 ```bash
 sudo ./desktop-commander-relay-manager.sh --install
 ```
 
-After a successful install, the manager is copied to `/usr/local/sbin/dc-relay-agent-manager`. You can subsequently run:
+If the repository was already cloned, update its `main` branch first (`git pull --ff-only`) after reviewing local changes.
+
+### Method 2 — Download the script directly (no Git clone)
+
+```bash
+curl -fL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh \
+  -o desktop-commander-relay-manager.sh
+chmod +x desktop-commander-relay-manager.sh
+sudo ./desktop-commander-relay-manager.sh
+```
+
+Alternatively, with `wget`:
+
+```bash
+wget -O desktop-commander-relay-manager.sh \
+  https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh
+chmod +x desktop-commander-relay-manager.sh
+sudo ./desktop-commander-relay-manager.sh
+```
+
+These commands download the **current script from the public `main` branch**. Review the file before executing it with `sudo` (for example, `less desktop-commander-relay-manager.sh`). For more reproducible installations, download a reviewed tag or commit-specific version rather than the moving `main` branch.
+
+### After installation
+
+After successful installation, the manager is copied to `/usr/local/sbin/dc-relay-agent-manager`. Open its menu from any directory:
 
 ```bash
 sudo dc-relay-agent-manager
 ```
 
-> **Installing from Git:** If you have committed this **new script** to the installer repository, you can obtain it with:
->
-> ```bash
-> git clone https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller.git
-> cd DesktopCommanderRelayAgentInstaller
-> chmod +x desktop-commander-relay-manager.sh
-> sudo ./desktop-commander-relay-manager.sh
-> ```
-> Do not assume the new file is present in an older checkout of the repository.
+**Important:** The script installs the **agent on this machine**. You must also follow the [main relay server configuration](#configure-the-main-relay-server) instructions to register or route requests to the new `DEVICE_ID` where needed.
 
 ## Interactive menu
 
@@ -318,7 +337,20 @@ The updater preserves the current `AGENT_TOKEN`, relay URL, device ID/name and s
 
 ### Updating the manager script itself
 
-**`--update` updates the relay agent and Desktop Commander, not this management Bash script.** To update the manager, obtain a reviewed new copy of `desktop-commander-relay-manager.sh`, then run it as root or replace the installed manager at `/usr/local/sbin/dc-relay-agent-manager` using a trusted, verified copy.
+**`--update` updates the relay agent and Desktop Commander, not this management Bash script.** To update the manager separately, download a reviewed version from the installer repository and replace only the manager executable:
+
+```bash
+curl -fL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh \
+  -o desktop-commander-relay-manager.sh
+# Review the downloaded script before installing it as root.
+less desktop-commander-relay-manager.sh
+sudo install -o root -g root -m 750 desktop-commander-relay-manager.sh \
+  /usr/local/sbin/dc-relay-agent-manager
+sudo dc-relay-agent-manager --version
+```
+
+This updates only the manager command, **not** the installed agent or its configuration. Review upstream changes before running newer code as root. To update the relay agent after that, use `sudo dc-relay-agent-manager --update`.
 
 ### Upgrading from the earlier one-shot installer
 
@@ -498,28 +530,59 @@ Refer to the license included in this installer repository. Upstream projects an
 
 عامل با **کاربر غیرروت** اجرا می‌شود. اگر فایل را با `sudo` از حساب عادی اجرا کنید، همان حساب به‌عنوان کاربر پیشنهادی نمایش داده می‌شود. در اجرای مستقیم توسط root، حساب اختصاصی `desktop-commander` پیشنهاد می‌شود و در صورت نیاز ساخته خواهد شد. امکان تعیین حساب موجود دیگر با `RUN_AS_USER` نیز وجود دارد.
 
-## نصب روی سرور جدید
+## نصب مستقیم روی سرور جدید از GitHub
 
-فایل `desktop-commander-relay-manager.sh` را روی **سرور جدید** قرار دهید:
+تمام دستورهای این بخش را روی **سرور جدیدی که می‌خواهید به Relay متصل شود** اجرا کنید، نه سرور اصلی Relay.
+
+### روش اول — دریافت مخزن با Git (پیشنهادی)
 
 ```bash
+git clone https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller.git
+cd DesktopCommanderRelayAgentInstaller
 chmod +x desktop-commander-relay-manager.sh
 sudo ./desktop-commander-relay-manager.sh
 ```
 
-از منو گزینهٔ **1 — Install a new relay agent** را انتخاب کنید. برای رفتن مستقیم به نصب:
+پس از نمایش منوی انگلیسی، گزینهٔ **1 — Install a new relay agent** را انتخاب کنید. اگر می‌خواهید بدون بازکردن منوی اصلی وارد مراحل نصب شوید، دستور آخر را به شکل زیر اجرا کنید:
 
 ```bash
 sudo ./desktop-commander-relay-manager.sh --install
 ```
 
-پس از نصب، دستور مدیریتی زیر در دسترس است:
+فایل `desktop-commander-relay-manager.sh` در شاخهٔ `main` مخزن [DesktopCommanderRelayAgentInstaller](https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller) قرار دارد. برای دریافت تغییرات در یک clone موجود می‌توانید بعد از بررسی تغییرات محلی از `git pull --ff-only` استفاده کنید.
+
+### روش دوم — دانلود مستقیم اسکریپت با curl یا wget
+
+بدون نیاز به clone کردن کل مخزن:
+
+```bash
+curl -fL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh \
+  -o desktop-commander-relay-manager.sh
+chmod +x desktop-commander-relay-manager.sh
+sudo ./desktop-commander-relay-manager.sh
+```
+
+یا با `wget`:
+
+```bash
+wget -O desktop-commander-relay-manager.sh \
+  https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh
+chmod +x desktop-commander-relay-manager.sh
+sudo ./desktop-commander-relay-manager.sh
+```
+
+چون فایل از شاخهٔ `main` دریافت می‌شود، ممکن است در آینده تغییر کند؛ پیش از اجرای دستور با `sudo`، محتوای آن را بررسی کنید. برای نصب کاملاً قابل تکرار بهتر است نسخه‌ای با tag یا commit مشخص دریافت کنید.
+
+### اجرای منو پس از نصب
+
+پس از نصب موفق، دستور مدیریتی زیر از هر مسیری قابل اجراست:
 
 ```bash
 sudo dc-relay-agent-manager
 ```
 
-اگر فایل جدید را در مخزن GitHub خود منتشر کرده‌اید، می‌توانید ابتدا مخزن را clone کنید. اما تا زمانی که فایل جدید به مخزن اضافه نشده است، صرفاً clone کردن نسخهٔ قدیمی، فایل `desktop-commander-relay-manager.sh` را در اختیار شما قرار نمی‌دهد.
+**یادآوری:** نصب Agent روی سرور جدید، جایگزین تنظیم سرور اصلی نیست. در بخش [تنظیم سرور اصلی بعد از نصب](#تنظیم-سرور-اصلی-بعد-از-نصب) مراحل اتصال و انتخاب `DEVICE_ID` توضیح داده شده است.
 
 ## مراحل راه‌اندازی
 
@@ -656,7 +719,19 @@ sudo dc-relay-agent-manager --update
 
 اگر نسخهٔ قدیمی با نام `install-desktop-commander-relay-agent.sh` نصب شده است و مسیرها استاندارد هستند، نسخهٔ جدید می‌تواند نصب موجود را تشخیص دهد. به‌جای پاک‌کردن فایل‌های قبلی، با منوی **2** یا **3** آن را به‌روزرسانی یا دوباره پیکربندی کنید. اگر مسیر نصب متفاوت بوده، `RELAY_DIR` قبلی را استفاده کنید.
 
-**تفاوت مهم:** دستور `--update`، کد Agent و پکیج Desktop Commander را آپدیت می‌کند؛ **خود فایل Bash مدیریتی به‌طور خودکار از اینترنت به‌روزرسانی نمی‌شود**. برای نسخهٔ جدید Manager باید فایل اسکریپت معتبر را جداگانه جایگزین کنید.
+**تفاوت مهم:** دستور `--update`، کد Agent و پکیج Desktop Commander را آپدیت می‌کند؛ **خود فایل Bash مدیریتی به‌طور خودکار از اینترنت به‌روزرسانی نمی‌شود**. برای به‌روزرسانی Manager، نسخهٔ جدید را مستقیماً از GitHub بگیرید، بررسی کنید و سپس در مسیر دستور نصب کنید:
+
+```bash
+curl -fL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh \
+  -o desktop-commander-relay-manager.sh
+less desktop-commander-relay-manager.sh
+sudo install -o root -g root -m 750 desktop-commander-relay-manager.sh \
+  /usr/local/sbin/dc-relay-agent-manager
+sudo dc-relay-agent-manager --version
+```
+
+این کار فقط اسکریپت مدیریتی را جایگزین می‌کند و تنظیمات Agent را پاک نمی‌کند. در صورت نیاز به آپدیت خود Agent، بعد از آن `sudo dc-relay-agent-manager --update` را اجرا کنید.
 
 ## دستورات کاربردی
 
