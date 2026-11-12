@@ -5,16 +5,17 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 SERVICE_NAME="desktop-commander-relay-agent"
 MAIN_SERVICE="desktop-commander-relay-server.service"
-RELAY_DIR="${RELAY_DIR:-/opt/desktop-commander-relay-agent}"
+RELAY_DIR="${RELAY_DIR:-}"
 RELAY_REPO="${RELAY_REPO:-https://github.com/ErfKS/DesktopCommanderRelay.git}"
 CONFIG_DIR="/etc/desktop-commander-relay"
 ENV_FILE="${CONFIG_DIR}/agent.env"
 STATE_FILE="${CONFIG_DIR}/manager.conf"
 UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-MANAGER_PATH="/usr/local/sbin/dc-relay-agent-manager"
+MANAGER_PATH="/usr/local/bin/dc-relay-agent-manager"
+LEGACY_MANAGER_PATH="/usr/local/sbin/dc-relay-agent-manager"
 LOG_FILE="/var/log/desktop-commander-relay-manager.log"
 DEFAULT_RELAY_WS_URL="${RELAY_WS_URL:-wss://mcp-relay.katebsaber.ir/agent}"
 STAGED_REPO=""
@@ -74,22 +75,26 @@ prepare_log() {
 }
 # Command output is saved to a root-only log. Secrets are never passed as arguments to run_step.
 run_step() {
-  local label="$1" pid result=0 i=0
+  local label="$1" pid result=0 i=0 frame
   shift
   prepare_log
   printf '\n[%s] %s\n' "$(date -Is)" "$label" >> "$LOG_FILE"
-  printf '  %s[>] %-52s%s' "$CYAN" "$label" "$RESET"
   ( "$@" ) >> "$LOG_FILE" 2>&1 &
   pid=$!
   if [[ -t 1 ]]; then
     local frames=('|' '/' '-' '\\')
     while kill -0 "$pid" 2>/dev/null; do
-      printf '\b%s' "${frames[i++ % 4]}"
+      frame="${frames[i++ % 4]}"
+      printf '\r  %s[>]%s %-52s %s' "$CYAN" "$RESET" "$label" "$frame"
       sleep 0.14
     done
-    printf '\b '
+  else
+    printf '  %s[>] %-52s%s' "$CYAN" "$label" "$RESET"
   fi
   wait "$pid" || result=$?
+  if [[ -t 1 ]]; then
+    printf '\r  %s[>]%s %-52s' "$CYAN" "$RESET" "$label"
+  fi
   if (( result != 0 )); then
     printf ' %sFAILED%s\n' "$RED" "$RESET"
     tail -n 35 "$LOG_FILE" >&2 || true
@@ -113,18 +118,44 @@ press_enter() {
   read -r -p "  Press Enter to continue..." _ || true
 }
 
+# Older installers may have used a different RELAY_DIR. Discover it from the
+# systemd unit first, then the manager metadata; never execute either file.
+discover_install_paths() {
+  local stored=""
+  if [[ -z "$RELAY_DIR" && -f "$UNIT_FILE" ]]; then
+    stored="$(sed -n 's/^WorkingDirectory=//p' "$UNIT_FILE" | head -n 1)"
+  fi
+  if [[ -z "$RELAY_DIR" && -z "$stored" && -f "$STATE_FILE" ]]; then
+    stored="$(sed -n 's/^RELAY_DIR=//p' "$STATE_FILE" | head -n 1)"
+  fi
+  RELAY_DIR="${RELAY_DIR:-${stored:-/opt/desktop-commander-relay-agent}}"
+  [[ "$RELAY_DIR" == /* && "$RELAY_DIR" != / && "$RELAY_DIR" != *[[:space:]]* ]] ||
+    fail 'Invalid RELAY_DIR. Use an absolute path without spaces (not /).'
+}
 is_installed() { [[ -f "$UNIT_FILE" && -f "$ENV_FILE" && -d "$RELAY_DIR" ]]; }
 install_manager_command() {
-  local source_path
-  source_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
-  if [[ -f "$source_path" && "$source_path" != "$MANAGER_PATH" ]]; then
-    install -o root -g root -m 750 -- "$source_path" "$MANAGER_PATH"
-    success "Management command: sudo dc-relay-agent-manager"
-  elif [[ "$source_path" == "$MANAGER_PATH" ]]; then
-    chmod 750 "$MANAGER_PATH"
-  else
-    warning "Cannot create persistent command from standard input. Keep this .sh file."
+  local source_path legacy_backup
+  source_path="$(readlink -f -- "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  if [[ ! -f "$source_path" ]]; then
+    warning 'Cannot install a persistent command from standard input. Download the .sh file first.'
+    return 1
   fi
+  mkdir -p "$(dirname "$MANAGER_PATH")"
+  if [[ "$source_path" != "$MANAGER_PATH" ]]; then
+    install -o root -g root -m 755 -- "$source_path" "$MANAGER_PATH"
+  else
+    chmod 755 "$MANAGER_PATH"
+  fi
+  # The historical /usr/local/sbin command is kept as a compatibility link.
+  if [[ -e "$LEGACY_MANAGER_PATH" && ! -L "$LEGACY_MANAGER_PATH" ]]; then
+    legacy_backup="${LEGACY_MANAGER_PATH}.previous.$(date +%Y%m%d-%H%M%S)-$$"
+    mv -- "$LEGACY_MANAGER_PATH" "$legacy_backup"
+  fi
+  if [[ "$LEGACY_MANAGER_PATH" != "$MANAGER_PATH" ]]; then
+    ln -sfn -- "$MANAGER_PATH" "$LEGACY_MANAGER_PATH"
+  fi
+  [[ -x "$MANAGER_PATH" ]] || fail "Manager command installation failed: $MANAGER_PATH"
+  success "Management command installed: $MANAGER_PATH"
 }
 
 # Read a systemd EnvironmentFile value without ever sourcing/evaluating it.
@@ -254,6 +285,33 @@ write_env() {
   mv -f "$temp" "$ENV_FILE"
 }
 
+# On updates, preserve the original file byte-for-byte except the executable
+# path setting. This protects custom fields, token, comments and formatting.
+update_commander_env_path() {
+  [[ -f "$ENV_FILE" ]] || { write_env; return; }
+  python3 - "$ENV_FILE" "$DESKTOP_COMMANDER_BIN" <<'PYENV'
+import os, pathlib, re, sys, tempfile
+p = pathlib.Path(sys.argv[1]); binary = sys.argv[2]
+old = p.read_text(encoding='utf-8')
+quoted = '"' + binary.replace('\\', '\\\\').replace('"', '\\"') + '"'
+line = 'DESKTOP_COMMANDER_COMMAND=' + quoted
+updated, count = re.subn(r'^DESKTOP_COMMANDER_COMMAND=.*$', lambda _: line, old, count=1, flags=re.M)
+if not count:
+    updated = old.rstrip('\n') + '\n' + line + '\n'
+if old != updated:
+    fd, name = tempfile.mkstemp(prefix='.agent.env.', dir=p.parent)
+    try:
+        with os.fdopen(fd,'w', encoding='utf-8') as f:
+            f.write(updated); f.flush(); os.fsync(f.fileno())
+        st = p.stat()
+        os.chmod(name, st.st_mode & 0o777)
+        os.chown(name, st.st_uid, st.st_gid)
+        os.replace(name, p)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+PYENV
+}
+
 ensure_user() {
   local account="$1"
   if ! id "$account" >/dev/null 2>&1; then
@@ -297,7 +355,97 @@ ensure_packages() {
   run_step 'Installing/updating Desktop Commander' npm install -g @wonderwhy-er/desktop-commander@latest
   DESKTOP_COMMANDER_BIN="$(command -v desktop-commander || true)"
   [[ -n "$DESKTOP_COMMANDER_BIN" ]] || fail 'desktop-commander command is not available on PATH.'
+  # npm may install package files with permissions a non-root service cannot read.
+  repair_package_permissions
   success "Node $(node --version)  /  npm $(npm --version)"
+}
+
+# Repair the permission issues caused by global npm installs and by build
+# staging directories (mktemp -d defaults to 0700). Do not touch ~/.ssh,
+# arbitrary user content, the manager token, or Linux sudoers here.
+package_directory() {
+  local npm_root package=""
+  npm_root="$(npm root -g 2>/dev/null || true)"
+  if [[ -n "$npm_root" && -d "$npm_root/@wonderwhy-er/desktop-commander" ]]; then
+    package="$npm_root/@wonderwhy-er/desktop-commander"
+  elif [[ -d /usr/lib/node_modules/@wonderwhy-er/desktop-commander ]]; then
+    package=/usr/lib/node_modules/@wonderwhy-er/desktop-commander
+  elif [[ -d /usr/local/lib/node_modules/@wonderwhy-er/desktop-commander ]]; then
+    package=/usr/local/lib/node_modules/@wonderwhy-er/desktop-commander
+  fi
+  [[ -n "$package" ]] || fail 'Desktop Commander npm package not found. Reinstall it with npm.'
+  printf '%s' "$package"
+}
+
+repair_package_permissions() {
+  local pkg account
+  pkg="$(package_directory)"
+  account="${RUN_AS_USER:-$(service_user)}"
+  info "Desktop Commander package: $pkg"
+  # npm can create the scoped parent directory with mode 0700 when this script
+  # runs under umask 077. Fixing only the package itself is then insufficient.
+  # Open only the npm global root/scope traversal, not unrelated packages.
+  local npm_global_root
+  npm_global_root="$(npm root -g 2>/dev/null || true)"
+  if [[ -n "$npm_global_root" && "$pkg" == "$npm_global_root/"* ]]; then
+    chmod a+rx "$npm_global_root" "$(dirname "$pkg")"
+  else
+    chmod a+rx "$(dirname "$pkg")"
+  fi
+  # Deliberately mirrors the requested repair, but discovers npm root and CLI path.
+  chmod -R a+rX "$pkg"
+  [[ -f "$pkg/dist/index.js" ]] || fail "Missing Desktop Commander entry point: $pkg/dist/index.js"
+  chmod 755 "$pkg/dist/index.js"
+  DESKTOP_COMMANDER_BIN="${DESKTOP_COMMANDER_BIN:-$(command -v desktop-commander || true)}"
+  [[ -n "$DESKTOP_COMMANDER_BIN" && -f "$DESKTOP_COMMANDER_BIN" ]] ||
+    fail 'Desktop Commander executable was not found.'
+  chmod 755 "$DESKTOP_COMMANDER_BIN"
+  runuser -u "$account" -- test -r "$pkg/package.json" ||
+    fail "Runtime account '$account' cannot read $pkg/package.json"
+  runuser -u "$account" -- test -x "$DESKTOP_COMMANDER_BIN" ||
+    fail "Runtime account '$account' cannot execute $DESKTOP_COMMANDER_BIN"
+  success "Desktop Commander package permissions: OK (user: $account)"
+}
+
+repair_repository_permissions() {
+  local dir="${1:-$RELAY_DIR}" account="${RUN_AS_USER:-$(service_user)}"
+  [[ -d "$dir" ]] || fail "Agent directory not found: $dir"
+  # Only runtime assets need to be readable. Avoid opening .git to all users.
+  chmod a+rx "$dir"
+  [[ -d "$dir/dist" ]] && chmod -R a+rX "$dir/dist"
+  [[ -d "$dir/node_modules" ]] && chmod -R a+rX "$dir/node_modules"
+  [[ -f "$dir/package.json" ]] && chmod a+r "$dir/package.json"
+  runuser -u "$account" -- test -x "$dir" || fail "'$account' cannot enter $dir"
+  runuser -u "$account" -- test -r "$dir/dist/agent/index.js" ||
+    fail "'$account' cannot read $dir/dist/agent/index.js"
+  success "Agent runtime directory permissions: OK (user: $account)"
+}
+
+repair_permissions() {
+  local restart="${1:-yes}" account
+  need_root; check_platform
+  [[ -f "$UNIT_FILE" ]] || fail 'Agent systemd service not found; install the agent first.'
+  account="$(service_user)"
+  ensure_user "$account"
+  heading 'DESKTOP COMMANDER PERMISSION REPAIR'
+  info '[1/5] Fixing global npm package directory permissions...'
+  repair_package_permissions
+  info '[2/5] Fixing agent build and executable permissions...'
+  repair_repository_permissions
+  info '[3/5] Verifying access for the actual service user...'
+  success "Verified: $account can read and execute both components."
+  if [[ "$restart" == yes ]]; then
+    info '[4/5] Restarting Desktop Commander Relay Agent...'
+    if ! systemctl restart "$SERVICE_NAME"; then
+      warning 'Service restart failed; showing diagnostics below.'
+    fi
+    sleep 3
+    info '[5/5] Checking service status and recent logs...'
+    systemctl --no-pager --full status "$SERVICE_NAME" || true
+    journalctl -u "$SERVICE_NAME" -n 25 --no-pager || true
+    systemctl is-active --quiet "$SERVICE_NAME" || fail 'Agent service is not active after permission repair.'
+  fi
+  success 'Permission repair completed.'
 }
 
 create_staged_repo() {
@@ -329,6 +477,7 @@ create_staged_repo() {
   run_step 'Installing locked project dependencies' npm --prefix "$STAGED_REPO" ci --no-audit
   run_step 'Building relay agent' npm --prefix "$STAGED_REPO" run build
   [[ -s "$STAGED_REPO/dist/agent/index.js" ]] || fail 'Missing agent build: dist/agent/index.js'
+  repair_repository_permissions "$STAGED_REPO"
 }
 
 write_unit() {
@@ -388,11 +537,20 @@ activate_staged_build() {
     fail 'Unable to activate the new build.'
   fi
   STAGED_REPO=""
-  write_env
-  write_unit
-  systemctl daemon-reload
-  systemctl enable "$SERVICE_NAME" >/dev/null
-  if systemctl restart "$SERVICE_NAME" && sleep 2 && systemctl is-active --quiet "$SERVICE_NAME"; then
+  # Run the entire activation as a transaction: if writing the config,
+  # repairing file permissions, reloading systemd, or restarting fails,
+  # the old unit, environment and build are restored below.
+  if (
+    if [[ -n "$old_env" ]]; then update_commander_env_path; else write_env; fi &&
+    write_unit &&
+    repair_package_permissions &&
+    repair_repository_permissions &&
+    systemctl daemon-reload &&
+    systemctl enable "$SERVICE_NAME" >/dev/null &&
+    systemctl restart "$SERVICE_NAME" &&
+    sleep 4 &&
+    systemctl is-active --quiet "$SERVICE_NAME"
+  ); then
     success "Agent service started: ${SERVICE_NAME}.service"
     if [[ -n "$old_dir" ]]; then
       success "Previous build retained at: $old_dir"
@@ -406,8 +564,15 @@ activate_staged_build() {
   if [[ -n "$old_env" ]]; then cp -p "$old_env" "$ENV_FILE"; else rm -f "$ENV_FILE"; fi
   if [[ -n "$old_unit" ]]; then cp -p "$old_unit" "$UNIT_FILE"; else rm -f "$UNIT_FILE"; fi
   systemctl daemon-reload
-  if [[ -n "$old_dir" ]]; then systemctl restart "$SERVICE_NAME" || true; fi
-  fail "Deployment rolled back. Check: journalctl -u ${SERVICE_NAME} -n 80"
+  if [[ -n "$old_dir" ]]; then
+    # Rollback must also repair the previously installed files. npm is global
+    # and does not roll back with the agent source directory.
+    repair_package_permissions || true
+    repair_repository_permissions "$RELAY_DIR" || true
+    systemctl restart "$SERVICE_NAME" || warning 'Previous agent also failed to start after rollback.'
+  fi
+  journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true
+  fail "Deployment rolled back. Inspect service logs and run: sudo dc-relay-agent-manager --repair-permissions"
 }
 
 save_metadata() {
@@ -457,6 +622,14 @@ set_sudo_policy() {
   local action="$1" account cfg
   account="$(service_user)"
   cfg="$(commander_config)"
+  # On fresh installations Desktop Commander may need a moment to create config.json.
+  if [[ ! -f "$cfg" ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    local attempt
+    for attempt in 1 2 3 4 5; do
+      sleep 1
+      [[ -f "$cfg" ]] && break
+    done
+  fi
   if [[ ! -f "$cfg" ]]; then
     warning "Config not found: $cfg"
     warning 'Start the agent and let Desktop Commander initialize its config, then retry this menu item.'
@@ -501,6 +674,8 @@ print('After:', new)
 print('sudo command is now ' + ('UNBLOCKED' if action=='enable' else 'BLOCKED') + '.')
 PY
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    repair_package_permissions
+    repair_repository_permissions
     if systemctl restart "$SERVICE_NAME"; then
       success 'Agent restarted to apply the sudo policy.'
     else
@@ -612,7 +787,8 @@ install_agent() {
   need_root; check_platform
   banner
   if is_installed; then
-    warning 'An installation is already present. Choose Update or Reconfigure from the menu.'
+    info 'Existing installation detected. Entering safe migration/update mode.'
+    update_agent
     return 0
   fi
   heading 'NEW AGENT SETUP  /  1 OF 4: RUNTIME ACCOUNT'
@@ -690,8 +866,10 @@ reconfigure_agent() {
   cp -p "$UNIT_FILE" "$prior_unit"
   write_env
   write_unit
+  repair_package_permissions
+  repair_repository_permissions
   systemctl daemon-reload
-  if systemctl restart "$SERVICE_NAME" && sleep 2 && systemctl is-active --quiet "$SERVICE_NAME"; then
+  if systemctl restart "$SERVICE_NAME" && sleep 3 && systemctl is-active --quiet "$SERVICE_NAME"; then
     mv "$prior" "${CONFIG_DIR}/agent.env.backup.$(date +%Y%m%d-%H%M%S)-$$"
     mv "$prior_unit" "${CONFIG_DIR}/agent.unit.backup.$(date +%Y%m%d-%H%M%S)-$$"
     success 'Settings saved and agent restarted.' 
@@ -728,6 +906,8 @@ follow_logs() {
 restart_agent() {
   need_root
   [[ -f "$UNIT_FILE" ]] || fail 'Agent service is not installed.'
+  repair_package_permissions
+  repair_repository_permissions
   run_step 'Restarting relay agent service' systemctl restart "$SERVICE_NAME"
   if systemctl is-active --quiet "$SERVICE_NAME"; then success 'Agent is active.';
   else warning 'Agent is not active; inspect its logs.'; fi
@@ -765,7 +945,11 @@ installation_guide() {
   banner
   heading 'QUICK START  /  UBUNTU & DEBIAN'
   cat <<'GUIDE'
-  1. Copy the script to your NEW AGENT server.
+  1. Clone the installer repository on your AGENT server:
+
+       git clone https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller.git
+       cd DesktopCommanderRelayAgentInstaller
+
   2. Start the interactive installer:
 
        chmod +x desktop-commander-relay-manager.sh
@@ -789,6 +973,7 @@ installation_guide() {
        sudo dc-relay-agent-manager --status
        sudo dc-relay-agent-manager --logs
        sudo dc-relay-agent-manager --restart
+       sudo dc-relay-agent-manager --repair-permissions
        sudo dc-relay-agent-manager --guide
 
   Important security notes:
@@ -845,10 +1030,11 @@ show_menu() {
      9)  Main relay server setup instructions
     10)  Installation & command-line guide
     11)  Uninstall service (preserve data)
+    12)  Repair Desktop Commander & agent permissions
      0)  Exit
 MENU
     line
-    read -r -p '  Choose an option [0-11]: ' choice || { printf '\n'; return 0; }
+    read -r -p '  Choose an option [0-12]: ' choice || { printf '\n'; return 0; }
     case "$choice" in
       1) install_agent; press_enter ;;
       2) update_agent; press_enter ;;
@@ -861,6 +1047,7 @@ MENU
       9) show_main_server_guide; press_enter ;;
       10) installation_guide; press_enter ;;
       11) uninstall_agent; press_enter ;;
+      12) repair_permissions yes; press_enter ;;
       0) printf '  Goodbye!\n'; return 0 ;;
       *) warning 'Please choose a valid menu option.'; sleep 0.5 ;;
     esac
@@ -886,6 +1073,7 @@ Options:
   --logs                 Print the latest 50 service log lines
   --follow-logs          Follow logs (Ctrl+C to exit)
   --sudo                 Manage Desktop Commander and Linux sudo policies
+  --repair-permissions   Repair package/agent access and restart service
   --main-relay           Main relay server setup commands
   --guide                Full setup walkthrough
   --uninstall            Uninstall service only, preserve all data
@@ -903,6 +1091,12 @@ from an unverified URL. Use a newer script file to update the manager.
 HELP
 }
 
+# Make the manager available immediately. Previously it was installed only after
+# a successful deployment, so any failed update left the command missing.
+discover_install_paths
+if (( EUID == 0 )) && [[ "${1:---menu}" != --version && "${1:---menu}" != --help && "${1:---menu}" != -h ]]; then
+  install_manager_command
+fi
 case "${1:---menu}" in
   --menu) show_menu ;;
   --install) install_agent ;;
@@ -913,6 +1107,7 @@ case "${1:---menu}" in
   --logs) logs_agent ;;
   --follow-logs) follow_logs ;;
   --sudo) sudo_menu ;;
+  --repair-permissions) repair_permissions yes ;;
   --main-relay) show_main_server_guide ;;
   --guide) installation_guide ;;
   --uninstall) uninstall_agent ;;

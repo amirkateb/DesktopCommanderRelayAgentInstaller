@@ -1,13 +1,13 @@
 # DesktopCommanderRelayAgentInstaller
 
-**Desktop Commander Relay Agent Manager — v2.0.0**  
+**Desktop Commander Relay Agent Manager — v2.1.0**  
 **by amirmohammad katebsaber**
 
 A colorful, interactive installer and management utility for connecting Ubuntu/Debian machines to a central [DesktopCommanderRelay](https://github.com/ErfKS/DesktopCommanderRelay) server. It installs the relay agent, creates a persistent `systemd` service, and provides guided updates, configuration, logs, health checks, and **optional** `sudo` policy management.
 
 **Languages:** [English](#english) · [فارسی](#راهنمای-فارسی)
 
-> **Important:** This README documents **`desktop-commander-relay-manager.sh` (v2.0.0)**, not the previous one-shot `install-desktop-commander-relay-agent.sh` script. The new manager is available in the [`main` branch](https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller) and can be installed directly from GitHub by cloning the repository or downloading the script.
+> **Important:** This README documents **`desktop-commander-relay-manager.sh` (v2.1.0)**, not the older one-shot `install-desktop-commander-relay-agent.sh` script. The commands below use the [repository](https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller). **To obtain v2.1.0 from GitHub, first publish the updated script to the `main` branch**; otherwise GitHub returns whichever version is currently published there.
 
 ---
 
@@ -22,6 +22,7 @@ A colorful, interactive installer and management utility for connecting Ubuntu/D
 - [First-run setup](#first-run-setup)
 - [Configure the main relay server](#configure-the-main-relay-server)
 - [Managing sudo access](#managing-sudo-access)
+- [Automatic permission repair](#automatic-permission-repair)
 - [Update and migration](#update-and-migration)
 - [Command-line reference](#command-line-reference)
 - [Files and directories](#files-and-directories)
@@ -40,7 +41,10 @@ The manager can:
 - Create and enable the `desktop-commander-relay-agent.service` systemd unit.
 - Configure a relay WebSocket URL, shared token, unique device ID and friendly device name.
 - Show installation status, Git revision, recent/live logs and a best-effort relay HTTP health check.
-- Update the agent using a staging build and attempt to roll back a deployment that fails its immediate service-start check.
+- Update the agent using a staged build, check runtime-user permissions before activation, and attempt rollback if deployment fails.
+- Repair Desktop Commander npm package permissions and the relay agent build automatically after npm installs, updates or rollback.
+- Install `dc-relay-agent-manager` immediately in `/usr/local/bin` (with compatibility link in `/usr/local/sbin`) even if the agent installation later fails.
+- Detect an existing installation location from its systemd unit for safe migration.
 - Manage Desktop Commander's `sudo` block setting separately from actual Linux `sudo` privileges.
 - Print the commands needed on the **main relay server** without changing that separate machine.
 
@@ -138,7 +142,7 @@ These commands download the **current script from the public `main` branch**. Re
 
 ### After installation
 
-After successful installation, the manager is copied to `/usr/local/sbin/dc-relay-agent-manager`. Open its menu from any directory:
+The manager is now installed **as soon as the new script is run with root privileges**, before the agent install/update starts. Its main path is `/usr/local/bin/dc-relay-agent-manager`; the old `/usr/local/sbin/dc-relay-agent-manager` path is maintained as a compatibility symlink. Even if the agent update fails, the manager command remains available. Open its menu from any directory:
 
 ```bash
 sudo dc-relay-agent-manager
@@ -152,7 +156,7 @@ The terminal UI has a banner, colored status indicators, installation-step feedb
 
 ```text
 DESKTOP COMMANDER / RELAY AGENT MANAGER
-v2.0.0 — by amirmohammad katebsaber
+v2.1.0 — by amirmohammad katebsaber
 
  1)  Install a new relay agent
  2)  Update agent + Desktop Commander
@@ -165,6 +169,7 @@ v2.0.0 — by amirmohammad katebsaber
  9)  Main relay server setup instructions
 10)  Installation & command-line guide
 11)  Uninstall service (preserve data)
+12)  Repair Desktop Commander & agent permissions
  0)  Exit
 ```
 
@@ -314,6 +319,56 @@ The rule grants the selected account **unrestricted passwordless sudo** (`NOPASS
 
 **Menu 8 → 4** removes only the sudoers file managed by this installer. It does **not** revoke permissions supplied by other `/etc/sudoers` or `/etc/sudoers.d/` rules. **Menu 8 → 5** displays the Desktop Commander policy and Linux account permission information.
 
+
+## Automatic permission repair
+
+**New in v2.1.0:** The previous updater used `mktemp -d` to create a staging directory, which starts with mode `0700`. Moving that directory into the active agent location without fixing its permissions could prevent a non-root systemd service from reading `dist/agent/index.js`. Separately, global `npm install -g` could leave Desktop Commander files inaccessible to the service user. Both paths are now covered.
+
+Permission checks run automatically:
+
+1. **After global npm install:** discover the npm package root (`npm root -g`, with common-path fallbacks), repair traversal permissions on the npm scope directory if required, and run `chmod -R a+rX` on the `@wonderwhy-er/desktop-commander` package.
+2. **Fix the MCP executable:** set mode `755` on the installed `dist/index.js` and the resolved `desktop-commander` executable.
+3. **Before deployment:** make the staged agent directory traversable and the `dist/` and `node_modules/` runtime assets readable/traversable. Test actual access with `runuser -u <service-user>`; do **not** change permissions on `.git` recursively.
+4. **Before service restart:** repeat permission checks on the active directory. If activation fails, restore the previous source/config/unit, recheck permissions on the restored build, and attempt to restart it.
+5. **During manual repair:** restart the service and display its status plus the last 25 journal lines.
+
+Run manually at any time with **Menu 12** or:
+
+```bash
+sudo dc-relay-agent-manager --repair-permissions
+```
+
+If the new manager has not yet been installed as a command, run:
+
+```bash
+sudo bash ./desktop-commander-relay-manager.sh --repair-permissions
+```
+
+The repair is deliberately scoped to the npm package and agent runtime assets. It **does not** add Linux sudoers privileges, unblock the `sudo` command, modify the shared relay token or delete existing configuration.
+
+**Equivalent manual repair for the standard Ubuntu npm path** (useful if the manager cannot run):
+
+```bash
+sudo bash -c '
+set -e
+PKG="/usr/lib/node_modules/@wonderwhy-er/desktop-commander"
+SERVICE="desktop-commander-relay-agent.service"
+test -d "$PKG" || { echo "Package not found: $PKG"; exit 1; }
+chmod -R a+rX "$PKG"
+chmod 755 "$PKG/dist/index.js"
+AGENT_USER=$(systemctl show "$SERVICE" -p User --value)
+AGENT_USER=${AGENT_USER:-root}
+runuser -u "$AGENT_USER" -- test -r "$PKG/package.json"
+runuser -u "$AGENT_USER" -- test -x /usr/bin/desktop-commander
+systemctl restart "$SERVICE"
+sleep 3
+systemctl --no-pager --full status "$SERVICE"
+journalctl -u "$SERVICE" -n 25 --no-pager
+'
+```
+
+That manual command assumes `/usr/lib/node_modules` and `/usr/bin/desktop-commander`. If npm installed elsewhere or the relay checkout itself has directory mode `0700`, use the manager's automatic repair instead.
+
 ## Update and migration
 
 ### Update the installed agent
@@ -326,37 +381,55 @@ sudo dc-relay-agent-manager --update
 
 The updater:
 
-1. Reads the existing agent identity, token and runtime account.
-2. Updates prerequisites and the global Desktop Commander npm package.
-3. Checks the existing Git checkout for tracked local modifications and refuses to overwrite a modified checkout.
-4. Clones the configured upstream relay repository into a temporary staging directory, runs `npm ci --no-audit` and `npm run build`, and checks for `dist/agent/index.js`.
-5. Replaces the active directory with the newly built revision, writes the environment and service files, and restarts the service.
-6. If the **immediate service-start check** fails, attempts to restore the previous source, environment and systemd unit. After a successful update, the previous source directory is retained with a `.previous.*` suffix.
+1. Reads the existing `agent.env` without evaluating it and preserves the token, device identity, relay URL, runtime account and any additional environment entries.
+2. Detects the existing agent directory from `WorkingDirectory=` in the installed systemd unit (unless `RELAY_DIR` is explicitly supplied), including installations created by the older installer.
+3. Updates prerequisites and the globally installed Desktop Commander package, **then repairs its permissions**.
+4. Checks the existing Git checkout for tracked local modifications and refuses to overwrite those changes. It downloads a fresh build into a staging directory, runs `npm ci --no-audit` and `npm run build`, and confirms `dist/agent/index.js` exists.
+5. Fixes staged-directory and runtime-asset permissions **before** deployment; verifies that the actual non-root service user can read/execute the required paths.
+6. Backs up the previous unit, agent environment and source checkout. Promotes the new build, repairs permissions again, reloads systemd and restarts.
+7. If activation or the immediate service-start check fails, attempts to restore the previous source, token/config and unit and repairs the restored build's permissions before restarting it. Failed builds remain under `.failed.*` for diagnosis.
 
-The updater preserves the current `AGENT_TOKEN`, relay URL, device ID/name and service user. **A service becoming active does not prove successful authentication or long-term health**: verify the logs after updating. Also note that upgrading the globally installed npm package is outside the source-directory rollback.
+**Important limitation:** A service becoming active does not prove successful authentication. Inspect `journalctl` for the relay-authenticated message. Global npm package versions are not rolled back automatically. If your first deployment had other custom modifications outside the standard directories, back them up separately.
 
 ### Updating the manager script itself
 
-**`--update` updates the relay agent and Desktop Commander, not this management Bash script.** To update the manager separately, download a reviewed version from the installer repository and replace only the manager executable:
+**`--update` updates the relay agent and global Desktop Commander package, not the management Bash script itself.** To upgrade the manager, download a reviewed version from the installer repository and invoke it as root; it will install itself to `/usr/local/bin/dc-relay-agent-manager` immediately:
 
 ```bash
 curl -fL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh \
   -o desktop-commander-relay-manager.sh
-# Review the downloaded script before installing it as root.
-less desktop-commander-relay-manager.sh
-sudo install -o root -g root -m 750 desktop-commander-relay-manager.sh \
-  /usr/local/sbin/dc-relay-agent-manager
+less desktop-commander-relay-manager.sh # Review before running as root.
+sudo bash ./desktop-commander-relay-manager.sh --version # Displays the downloaded version (no installation).
+sudo bash ./desktop-commander-relay-manager.sh --menu # Registers the command immediately.
 sudo dc-relay-agent-manager --version
 ```
 
-This updates only the manager command, **not** the installed agent or its configuration. Review upstream changes before running newer code as root. To update the relay agent after that, use `sudo dc-relay-agent-manager --update`.
+If upgrading from a cloned repository, use `git pull --ff-only` and run the updated script. Only after uploading the **v2.1.0** version to the repository will the URL above fetch v2.1.0. To update the relay agent itself afterward, run `sudo dc-relay-agent-manager --update`.
+
+**If you need to repair an existing server immediately using the downloaded ZIP (before publishing to GitHub):** extract the two files on the agent server, then run:
+
+```bash
+sudo bash ./desktop-commander-relay-manager.sh --repair-permissions
+sudo dc-relay-agent-manager --update
+```
+
+The first command registers the manager and repairs the current installation without updating its packages. The second command starts the normal update wizard. Do not run both simultaneously.
 
 ### Upgrading from the earlier one-shot installer
 
-Older installs used `install-desktop-commander-relay-agent.sh`. The manager recognizes an installation if its usual agent directory, environment file and systemd unit are present. Keep your existing credentials. Launch the new manager and choose **2 — Update** or **3 — Configure**; do not delete existing configuration just to switch installers. If your previous installation used a custom directory, pass the same `RELAY_DIR` override.
+Older installs used `install-desktop-commander-relay-agent.sh` and sometimes contained an agent directory that only root could enter. v2.1.0 reads the existing systemd unit and config to detect the original installation directory and service user. It does not require you to remove or recreate the old agent. Use the updated management script and choose **2 — Update**, or run the new script with `--install` to enter the migration/update flow when an existing installation is detected. Keep the original token unchanged.
 
-If the existing Git checkout has tracked local changes or an unexpected directory layout, the update may refuse to proceed rather than overwriting files. Review the state manually.
+```bash
+# From an already cloned and updated installer repository:
+git pull --ff-only
+sudo bash ./desktop-commander-relay-manager.sh --update
+# If the previous attempt left the agent stopped:
+sudo dc-relay-agent-manager --repair-permissions
+sudo dc-relay-agent-manager --status
+```
+
+For installations with an unusual directory layout or a custom systemd unit, inspect the path first (`systemctl cat desktop-commander-relay-agent`) and provide `RELAY_DIR` explicitly if auto-detection does not match. The script will not overwrite a checkout with tracked local modifications.
 
 ## Command-line reference
 
@@ -373,6 +446,7 @@ After installation:
 | `sudo dc-relay-agent-manager --logs` | Show recent agent logs |
 | `sudo dc-relay-agent-manager --follow-logs` | Follow live logs (Ctrl+C to exit) |
 | `sudo dc-relay-agent-manager --sudo` | Open the sudo policy submenu |
+| `sudo dc-relay-agent-manager --repair-permissions` | Repair npm/agent permissions, restart, show logs |
 | `sudo dc-relay-agent-manager --main-relay` | Show main relay setup steps |
 | `sudo dc-relay-agent-manager --guide` | Show built-in installation guide |
 | `sudo dc-relay-agent-manager --uninstall` | Disable and remove service only |
@@ -389,7 +463,7 @@ You may also call the downloaded `.sh` file directly with any of the same flags.
 | Agent configuration (`AGENT_TOKEN` included) | `/etc/desktop-commander-relay/agent.env` |
 | Manager state/metadata | `/etc/desktop-commander-relay/manager.conf` |
 | Agent systemd unit | `/etc/systemd/system/desktop-commander-relay-agent.service` |
-| Persistent manager executable | `/usr/local/sbin/dc-relay-agent-manager` |
+| Persistent manager executable | `/usr/local/bin/dc-relay-agent-manager` (legacy symlink in `/usr/local/sbin`) |
 | Manager operation log | `/var/log/desktop-commander-relay-manager.log` |
 | Desktop Commander JSON policy | `<runtime-user-home>/.claude-server-commander/config.json` |
 | Backup files from updates | `/etc/desktop-commander-relay/backups/` and `<agent-directory>.previous.*` |
@@ -429,7 +503,7 @@ sudo env RUN_AS_USER=deploy \
 | `RELAY_WS_URL` | Default URL offered by the connection wizard |
 | `NO_COLOR=1` | Suppress ANSI terminal colors |
 
-**Custom directory caution:** If you install into a non-default `RELAY_DIR`, supply the same override on subsequent manager operations; the v2.0.0 manager's detection uses the active `RELAY_DIR` environment value. Avoid whitespace in custom installation paths.
+**Custom directory caution:** If you install into a non-default `RELAY_DIR`, supply the same override on subsequent manager operations; the v2.1.0 manager's detection uses the active `RELAY_DIR` environment value. Avoid whitespace in custom installation paths.
 
 ## Verification and troubleshooting
 
@@ -510,7 +584,7 @@ Refer to the license included in this installer repository. Upstream projects an
 
 # راهنمای فارسی
 
-این بخش، راهنمای فارسی **نسخهٔ ۲.۰.۰** ابزار Desktop Commander Relay Agent Manager است. متن‌ها و منوهای **خود اسکریپت انگلیسی** هستند؛ این بخش فقط برای مستندسازی و راهنمای کاربران فارسی‌زبان تهیه شده است.
+این بخش، راهنمای فارسی **نسخهٔ ۲.۱.۰** ابزار Desktop Commander Relay Agent Manager است. متن‌ها و منوهای **خود اسکریپت انگلیسی** هستند؛ این بخش فقط برای مستندسازی و راهنمای کاربران فارسی‌زبان تهیه شده است.
 
 ## معرفی و قابلیت‌های نسخهٔ جدید
 
@@ -679,6 +753,7 @@ curl -fsS https://mcp-relay.katebsaber.ir/healthz
 | `9` | راهنمای تنظیم سرور اصلی |
 | `10` | راهنمای نصب و دستورات خط فرمان |
 | `11` | حذف سرویس با حفظ فایل‌ها و تنظیمات |
+| `12` | ترمیم خودکار مجوزهای Desktop Commander و Agent، ریستارت و مشاهدهٔ لاگ‌ها |
 | `0` | خروج |
 
 ## مدیریت دسترسی sudo
@@ -705,6 +780,33 @@ curl -fsS https://mcp-relay.katebsaber.ir/healthz
 
 گزینهٔ **8 → 4** فقط فایل sudoers ساخته‌شده توسط همین نصب‌کننده را حذف می‌کند و مجوزهای دیگری را که به کاربر داده‌اید تغییر نمی‌دهد. گزینهٔ **8 → 5** وضعیت مجوزها را نشان می‌دهد.
 
+
+## ترمیم مجوزهای دسترسی (جدید در نسخهٔ ۲.۱)
+
+یکی از دلایل خطای آپدیت نسخهٔ قبلی این بود که پوشهٔ موقت با `mktemp -d` و مجوز `700` ساخته می‌شد و بعد از انتقال به مسیر نصب، حساب غیرروت سرویس نمی‌توانست فایل‌های Agent را بخواند. همچنین پس از اجرای `npm install -g` ممکن بود پکیج Desktop Commander دسترسی خواندن/اجرا برای کاربر سرویس نداشته باشد.
+
+در نسخهٔ ۲.۱ این اقدامات به‌صورت خودکار انجام می‌شوند:
+
+1. تشخیص مسیر واقعی پکیج Desktop Commander با `npm root -g`، اصلاح مجوز ورود به پوشهٔ والد در صورت نیاز و ترمیم دسترسی پکیج با `chmod -R a+rX`.
+2. اعمال مجوز `755` روی `dist/index.js` و فایل اجرایی `desktop-commander`.
+3. اصلاح مجوز پوشهٔ موقت و مسیرهای `dist` و `node_modules` در Agent **پیش از جایگزینی نسخه**.
+4. تست مجوزها از دید **حساب واقعی سرویس** با `runuser`، نه فقط حساب `root`.
+5. تکرار کنترل مجوزها پیش از ریستارت و حتی پس از بازگردانی نسخهٔ قبلی، همراه با نمایش وضعیت سرویس و ۲۵ خط آخر لاگ هنگام ترمیم دستی.
+
+برای ترمیم مستقل از آپدیت از **گزینهٔ ۱۲ منو** یا این دستور استفاده کنید:
+
+```bash
+sudo dc-relay-agent-manager --repair-permissions
+```
+
+اگر دستور مدیریتی هنوز ایجاد نشده است:
+
+```bash
+sudo bash ./desktop-commander-relay-manager.sh --repair-permissions
+```
+
+این عملیات **به هیچ عنوان** مجوز `NOPASSWD` لینوکس ایجاد نمی‌کند و مقدار `AGENT_TOKEN` را تغییر نمی‌دهد. مجوزهای مخزن `.git` نیز به‌شکل بازگشتی عمومی نمی‌شوند. دستور دستی مربوط به نصب‌های استاندارد Ubuntu در بخش [English / Automatic permission repair](#automatic-permission-repair) هم درج شده است.
+
 ## به‌روزرسانی و مهاجرت از نسخهٔ قدیمی
 
 برای آپدیت:
@@ -713,25 +815,42 @@ curl -fsS https://mcp-relay.katebsaber.ir/healthz
 sudo dc-relay-agent-manager --update
 ```
 
-در آپدیت، توکن، شناسه، نام دستگاه، نشانی اتصال و حساب اجرای سرویس حفظ می‌شوند. اسکریپت کد جدید را در مسیر موقت دریافت، وابستگی‌ها را نصب و پروژه را build می‌کند. اگر شروع فوری سرویس جدید ناموفق باشد، تلاش می‌کند کد، فایل تنظیمات و سرویس قبلی را بازگرداند. نسخهٔ قبلی پروژه بعد از آپدیت موفق با پسوند `.previous.*` باقی می‌ماند.
+در آپدیت، توکن، شناسه، نام دستگاه، نشانی اتصال، حساب اجرای سرویس و تنظیمات اضافی موجود در `agent.env` حفظ می‌شوند. این نسخه مسیر قبلی نصب را از `WorkingDirectory` فایل سرویس تشخیص می‌دهد، فایل‌های جدید را در مسیر موقت build می‌کند و **قبل از شروع سرویس** دسترسی حساب اجرای Agent را به‌صورت واقعی آزمایش می‌کند. اگر فعال‌سازی شکست بخورد، پوشهٔ قبلی و فایل‌های سرویس و تنظیمات را بازمی‌گرداند و دسترسی‌ها را دوباره ترمیم می‌کند.
 
-**محدودیت مهم:** فعال شدن اولیهٔ سرویس معادل موفقیت احراز هویت نیست. همچنین بازگردانی پوشهٔ پروژه، لزوماً نسخهٔ پکیج عمومی npm را به عقب برنمی‌گرداند. بعد از آپدیت لاگ‌ها را بررسی کنید.
+**محدودیت:** شروع اولیهٔ سرویس به‌تنهایی احراز هویت را تضمین نمی‌کند؛ لاگ‌ها را هم بررسی کنید. نسخهٔ سراسری npm در rollback به نسخهٔ قبلی بازنمی‌گردد. همچنین تغییرات محلی track شده در مخزن Agent بدون اجازه بازنویسی نمی‌شوند.
 
-اگر نسخهٔ قدیمی با نام `install-desktop-commander-relay-agent.sh` نصب شده است و مسیرها استاندارد هستند، نسخهٔ جدید می‌تواند نصب موجود را تشخیص دهد. به‌جای پاک‌کردن فایل‌های قبلی، با منوی **2** یا **3** آن را به‌روزرسانی یا دوباره پیکربندی کنید. اگر مسیر نصب متفاوت بوده، `RELAY_DIR` قبلی را استفاده کنید.
+**برای مهاجرت از نصب‌کنندهٔ قدیمی:** ابتدا نسخهٔ جدید فایل مدیریتی را از GitHub دریافت کنید (پس از انتشار آن در شاخهٔ `main`) یا از فایل ZIP همین نسخه استفاده کنید. اجرای اسکریپت جدید به‌صورت روت، دستور مدیریتی را **قبل از نصب یا آپدیت Agent** در `/usr/local/bin` نصب می‌کند؛ در نتیجه شکست آپدیت، این دستور را حذف نمی‌کند. سپس آپدیت را اجرا کنید:
 
-**تفاوت مهم:** دستور `--update`، کد Agent و پکیج Desktop Commander را آپدیت می‌کند؛ **خود فایل Bash مدیریتی به‌طور خودکار از اینترنت به‌روزرسانی نمی‌شود**. برای به‌روزرسانی Manager، نسخهٔ جدید را مستقیماً از GitHub بگیرید، بررسی کنید و سپس در مسیر دستور نصب کنید:
+```bash
+git clone https://github.com/amirkateb/DesktopCommanderRelayAgentInstaller.git
+cd DesktopCommanderRelayAgentInstaller
+sudo bash ./desktop-commander-relay-manager.sh --update
+sudo dc-relay-agent-manager --repair-permissions
+```
+
+اگر مخزن را قبلاً دریافت کرده‌اید، به‌جای `git clone` وارد پوشه شوید و پس از بررسی تغییرات، `git pull --ff-only` بزنید. راه نصب مستقیم با `curl` و `wget` نیز در بخش [نصب مستقیم روی سرور جدید از GitHub](#نصب-مستقیم-روی-سرور-جدید-از-github) وجود دارد.
+
+**آپدیت خود Manager با آپدیت Agent متفاوت است.** `--update` کد Agent و پکیج Desktop Commander را ارتقا می‌دهد. برای دریافت نسخهٔ جدید فایل Bash مدیریتی، از دستور زیر استفاده کنید:
 
 ```bash
 curl -fL --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/amirkateb/DesktopCommanderRelayAgentInstaller/main/desktop-commander-relay-manager.sh \
   -o desktop-commander-relay-manager.sh
 less desktop-commander-relay-manager.sh
-sudo install -o root -g root -m 750 desktop-commander-relay-manager.sh \
-  /usr/local/sbin/dc-relay-agent-manager
+sudo bash ./desktop-commander-relay-manager.sh --menu
 sudo dc-relay-agent-manager --version
 ```
 
-این کار فقط اسکریپت مدیریتی را جایگزین می‌کند و تنظیمات Agent را پاک نمی‌کند. در صورت نیاز به آپدیت خود Agent، بعد از آن `sudo dc-relay-agent-manager --update` را اجرا کنید.
+**توجه:** تا زمانی که اسکریپت جدید نسخهٔ ۲.۱.۰ را در GitHub منتشر نکرده باشید، URL بالا نسخهٔ قدیمیِ موجود در شاخهٔ `main` را تحویل می‌دهد.
+
+**رفع فوری مشکل با فایل ZIP قبل از Push به GitHub:** هر دو فایل را از ZIP خارج کنید، به سرور منتقل کنید و در همان پوشه این دستورات را اجرا کنید:
+
+```bash
+sudo bash ./desktop-commander-relay-manager.sh --repair-permissions
+sudo dc-relay-agent-manager --update
+```
+
+دستور اول Manager را ثبت و مجوزهای نصب فعلی را ترمیم می‌کند؛ دستور دوم مراحل آپدیت عادی را آغاز می‌کند. این دو عملیات را هم‌زمان اجرا نکنید.
 
 ## دستورات کاربردی
 
@@ -744,6 +863,7 @@ sudo dc-relay-agent-manager --restart
 sudo dc-relay-agent-manager --logs
 sudo dc-relay-agent-manager --follow-logs
 sudo dc-relay-agent-manager --sudo
+sudo dc-relay-agent-manager --repair-permissions
 sudo dc-relay-agent-manager --main-relay
 sudo dc-relay-agent-manager --guide
 sudo dc-relay-agent-manager --uninstall
@@ -771,7 +891,7 @@ sudo journalctl -u desktop-commander-relay-agent.service -f
 | تنظیمات و توکن | `/etc/desktop-commander-relay/agent.env` |
 | متادیتای Manager | `/etc/desktop-commander-relay/manager.conf` |
 | سرویس | `/etc/systemd/system/desktop-commander-relay-agent.service` |
-| دستور مدیریتی | `/usr/local/sbin/dc-relay-agent-manager` |
+| دستور مدیریتی | `/usr/local/bin/dc-relay-agent-manager` (سازگاری با مسیر `/usr/local/sbin` حفظ می‌شود) |
 | لاگ Manager | `/var/log/desktop-commander-relay-manager.log` |
 | فایل Desktop Commander | `<home>/.claude-server-commander/config.json` |
 
@@ -785,17 +905,18 @@ sudo env RUN_AS_USER=deploy \
   ./desktop-commander-relay-manager.sh --install
 ```
 
-در استفاده از `RELAY_DIR` سفارشی، در اجرای‌های بعدی Manager نیز همان متغیر را تعیین کنید؛ نسخهٔ ۲.۰.۰ مسیر سفارشی را برای تشخیص نصب، مستقیماً از متغیر محیطی می‌خواند.
+نسخهٔ ۲.۱.۰ مسیر نصب موجود را از `WorkingDirectory` سرویس systemd تشخیص می‌دهد؛ اگر `RELAY_DIR` را صریحاً تعریف کنید، همان مقدار اولویت خواهد داشت.
 
 ## رفع اشکال
 
-- **سرویس اجرا نمی‌شود:** وضعیت systemd و `journalctl` را بررسی کنید؛ همچنین دسترسی حساب سرویس و فایل build شده را چک کنید.
+- **سرویس اجرا نمی‌شود یا بعد از آپدیت rollback شده است:** ابتدا `sudo dc-relay-agent-manager --repair-permissions` را اجرا کنید و سپس وضعیت `systemd` و `journalctl` را بررسی کنید. اگر فرمان نصب نشده است، فایل جدید `.sh` را با `sudo bash` اجرا کنید.
 - **خطای احراز هویت:** مقدار `AGENT_TOKEN` در سرور اصلی و Agent باید یکسان باشد؛ از دستور `--configure` استفاده کنید.
 - **سرور اصلی در دسترس نیست:** DNS، گواهی TLS، فایروال، آدرس WebSocket و لاگ هر دو سرویس را بررسی کنید.
-- **Desktop Commander پیدا نمی‌شود:** دستور `command -v desktop-commander` را بزنید؛ در صورت نیاز Agent را آپدیت کنید.
+- **Desktop Commander پیدا نمی‌شود یا خطای `EACCES/Permission denied` دارد:** دستور `command -v desktop-commander` را بررسی کنید و گزینهٔ ۱۲ را اجرا کنید. فایل اجرایی و مسیر پکیج npm ممکن است نیاز به ترمیم داشته باشند.
 - **دستور sudo مسدود است:** وضعیت `blockedCommands` را با منوی 8 بررسی کنید. نبودن دسترسی لینوکس با مسدود بودن دستور در Desktop Commander متفاوت است.
 - **دستگاه جدید به‌صورت پیش‌فرض انتخاب نمی‌شود:** `DEVICE_ID` را با `TARGET_DEVICE_ID` سرور اصلی تطبیق دهید یا در درخواست‌ها شناسهٔ دستگاه را صریح بفرستید.
 - **آپدیت با خطای Git متوقف می‌شود:** تغییرات محلی را بررسی کنید؛ ابزار برای محافظت از فایل‌های شما تغییرات track شده را بی‌اجازه بازنویسی نمی‌کند.
+- **دستور `sudo dc-relay-agent-manager` پیدا نمی‌شود:** نسخهٔ ۲.۱ را یک بار با `sudo bash ./desktop-commander-relay-manager.sh --menu` اجرا کنید؛ دستور جدید در `/usr/local/bin` ثبت و مسیر قدیمی در `/usr/local/sbin` به آن متصل می‌شود.
 
 ## حذف و نکات امنیتی
 
@@ -819,5 +940,5 @@ sudo dc-relay-agent-manager --uninstall
 
 ---
 
-**Desktop Commander Relay Agent Manager v2.0.0**  
+**Desktop Commander Relay Agent Manager v2.1.0**  
 **by amirmohammad katebsaber**
